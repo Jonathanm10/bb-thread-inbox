@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import type { PluginThreadAction, PluginThreadActionEntry } from "@get-bb/plugin-sdk/app";
 import { renderSlot } from "./test-slot";
 import { defaultProviders, inbox, listProps, loadInboxApp, thread } from "./test-inbox";
@@ -103,15 +103,53 @@ describe("other plugins' thread actions", () => {
 
     fireEvent.click(within(await openMenu()).getByRole("menuitem", { name: "Model" }));
     const choices = await screen.findByRole("menu", { name: "Model" });
+    // As in bb's own menus: plain items, the current choice marked current.
     expect(
       within(choices)
-        .getAllByRole("menuitemcheckbox")
-        .map((item) => [item.textContent, item.getAttribute("aria-checked")]),
+        .getAllByRole("menuitem")
+        .map((item) => [item.textContent, item.getAttribute("aria-current")]),
     ).toEqual([
       ["Fast", "true"],
-      ["Deep", "false"],
+      ["Deep", null],
     ]);
-    fireEvent.click(within(choices).getByRole("menuitemcheckbox", { name: "Deep" }));
+    fireEvent.click(within(choices).getByRole("menuitem", { name: "Deep" }));
     await waitFor(() => expect(model.action.run).toHaveBeenCalledWith("deep"));
+  });
+
+  it("keeps an action that bb sorts before its group's own actions ahead of them", async () => {
+    renderWithActions([
+      pluginAction("branch-tools/first", "1_open", { label: "Open first" }),
+      pluginAction("bb--core/split", "1_open", { label: "Open in split" }),
+      pluginAction("branch-tools/later", "1_open", { label: "Open later" }),
+    ]);
+    const labels = within(await openMenu())
+      .getAllByRole("menuitem")
+      .map((item) => item.textContent);
+    expect(labels.slice(0, 5)).toEqual(["Open first", "Open in split", "Parent", "Project", "Open later"]);
+  });
+
+  it("hands focus to the row's title editor when an action renames from the open menu", async () => {
+    renderSlot(inbox, listProps, {
+      sidebarThreads: {
+        status: "ready",
+        threads: [thread({ id: "thr_menu", title: "Right click me" })],
+        projects: [{ id: "proj_1", name: "bb", isPersonal: false, href: "", settingsHref: "" }],
+      },
+      providers: { status: "ready", providers: defaultProviders },
+      rpc: { listLifecycle: () => ({ rows: [] }) },
+      threadActions: (target, { requestRename }) =>
+        [pluginAction("titles/rename", "2_organize", { label: "Rename from plugin" })].map((entry) => ({
+          ...entry,
+          action: { ...entry.action, run: async () => requestRename(target.id) },
+        })),
+    });
+    const row = await screen.findByRole("link", { name: "Right click me" });
+    act(() => row.focus());
+    fireEvent.contextMenu(row);
+    const menu = await screen.findByRole("menu", { name: "Thread actions" });
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Rename from plugin" }));
+    const editor = await screen.findByRole("textbox", { name: "Rename Right click me" });
+    await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(document.activeElement).toBe(editor);
   });
 });

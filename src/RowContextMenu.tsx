@@ -1,16 +1,11 @@
 import { BbIcon, THREAD_ACTION_GROUPS as GROUPS, useThreadActions, useSidebarThreads } from "./bb-sdk";
-import { Fragment, useRef, useState, type ReactNode } from "react";
+import { Fragment, useRef, useState, type ReactNode, type RefObject } from "react";
 import * as ContextMenu from "@radix-ui/react-context-menu";
-import {
-  useBbNavigate,
-  useRpc,
-  type PluginBoundThreadAction,
-  type PluginSidebarThread,
-  type PluginThreadActionEntry,
-} from "@get-bb/plugin-sdk/app";
+import { useBbNavigate, useRpc, type PluginSidebarThread, type PluginThreadActionEntry } from "@get-bb/plugin-sdk/app";
 import { errorDetail, toast } from "./lib/toast";
 import type { threadInboxRpcContract } from "./contract";
 import { ParentThreadMenu } from "./ParentThreadMenu";
+import { ThreadActionChoices } from "./ThreadActionChoices";
 import { notifiesParent, ParentNotificationsMenu } from "./ParentNotificationsMenu";
 import { DeleteThreadDialog } from "./DeleteThreadDialog";
 import { SnoozePickerDialog } from "./SnoozePickerDialog";
@@ -36,14 +31,18 @@ type RowContextMenuProps = {
 /** Keep the plugin's menus, but build their actions and dialogs only on first open. */
 export function RowContextMenu({ children, ...props }: RowContextMenuProps) {
   const [activated, setActivated] = useState(false);
+  // True from opening until the menu has handed focus back.
+  const shown = useRef(false);
   return (
     <ContextMenu.Root
       onOpenChange={(open) => {
-        if (open) setActivated(true);
+        if (!open) return;
+        shown.current = true;
+        setActivated(true);
       }}
     >
       <ContextMenu.Trigger asChild>{children}</ContextMenu.Trigger>
-      {activated ? <RowMenuContents {...props} /> : null}
+      {activated ? <RowMenuContents {...props} shown={shown} /> : null}
     </ContextMenu.Root>
   );
 }
@@ -59,8 +58,17 @@ function RowMenuContents({
   onUnsettle,
   onWake,
   onRename,
-}: Omit<RowContextMenuProps, "children">) {
-  const actions = useThreadActions(thread, { requestRename: () => onRename?.() });
+  shown,
+}: Omit<RowContextMenuProps, "children"> & { shown: RefObject<boolean> }) {
+  // The rename to start once the menu has released focus.
+  const renameAfterClose = useRef<(() => void) | null>(null);
+  const actions = useThreadActions(thread, {
+    // A plugin action that renames from the open menu waits for it to release focus.
+    requestRename: () => {
+      if (shown.current) renameAfterClose.current = () => onRename?.();
+      else onRename?.();
+    },
+  });
   const pluginGroups = groupPluginActions(actions);
   const navigate = useBbNavigate();
   // bb 0.46 always supplies pin/read/rename/archive for sidebar rows, and bb
@@ -75,7 +83,6 @@ function RowMenuContents({
   const project = projects.find((project) => project.id === thread.projectId);
   const portalScope = usePortalScopeProps();
   const rpc = useRpc<typeof threadInboxRpcContract>();
-  const renameAfterClose = useRef(false);
   const leavingForSettings = useRef(false);
   // Outlives the portaled submenu, which unmounts when a choice closes the menu.
   const pendingNotificationSave = useRef<Promise<void> | null>(null);
@@ -111,19 +118,22 @@ function RowMenuContents({
           {...portalScope}
           aria-label="Thread actions"
           onCloseAutoFocus={(event) => {
+            shown.current = false;
             if (leavingForSettings.current) event.preventDefault();
             leavingForSettings.current = false;
             // A dialog takes focus next; do not pull it back to the row.
             if (confirmingDelete || pickingSnooze) event.preventDefault();
-            if (!renameAfterClose.current) return;
-            renameAfterClose.current = false;
+            const rename = renameAfterClose.current;
+            if (!rename) return;
+            renameAfterClose.current = null;
             // Hand focus to the editor after the menu releases its focus scope.
             event.preventDefault();
-            void run("rename");
+            rename();
           }}
           className="z-50 min-w-44 rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-md"
         >
           <PluginGroups groups={pluginGroups} before={GROUPS.open} />
+          <PluginItems entries={pluginGroups.get(GROUPS.open)?.leading} />
           <Item onSelect={() => void run("split")}>Open in split</Item>
           <ParentThreadMenu thread={thread} />
           {notifiesParent(thread) ? (
@@ -158,9 +168,10 @@ function RowMenuContents({
               </ContextMenu.Portal>
             </ContextMenu.Sub>
           ) : null}
-          <PluginItems entries={pluginGroups.get(GROUPS.open)} />
+          <PluginItems entries={pluginGroups.get(GROUPS.open)?.trailing} />
           <PluginGroups groups={pluginGroups} after={GROUPS.open} before={GROUPS.state} />
           {hasPinLifecycleItems ? <Separator /> : null}
+          <PluginItems entries={pluginGroups.get(GROUPS.state)?.leading} />
           {thread.isPinned || thread.parentThreadId == null ? (
             <Item icon={thread.isPinned ? "PinOff" : "Pin"} onSelect={() => void togglePin()}>
               {thread.isPinned ? "Unpin" : "Pin"}
@@ -189,31 +200,33 @@ function RowMenuContents({
               Un-settle
             </Item>
           ) : null}
-          <PluginItems entries={pluginGroups.get(GROUPS.state)} />
+          <PluginItems entries={pluginGroups.get(GROUPS.state)?.trailing} />
           <PluginGroups groups={pluginGroups} after={GROUPS.state} before={GROUPS.organize} />
           <Separator />
+          <PluginItems entries={pluginGroups.get(GROUPS.organize)?.leading} />
           {onRename ? (
             <Item
               onSelect={() => {
-                renameAfterClose.current = true;
+                renameAfterClose.current = () => void run("rename");
               }}
             >
               Rename
             </Item>
           ) : null}
           <Item onSelect={() => void run("read")}>{thread.isUnread ? "Mark read" : "Mark unread"}</Item>
-          <PluginItems entries={pluginGroups.get(GROUPS.organize)} />
+          <PluginItems entries={pluginGroups.get(GROUPS.organize)?.trailing} />
           <Separator />
           <CopySubmenu thread={thread} onCopyLink={() => void run("copyLink")} />
           <PluginGroups groups={pluginGroups} after={GROUPS.organize} before={GROUPS.lifecycle} />
           <Separator />
+          <PluginItems entries={pluginGroups.get(GROUPS.lifecycle)?.leading} />
           <Item disabled={!canArchive} onSelect={() => void run("archive")}>
             Archive
           </Item>
           <Item destructive onSelect={() => setConfirmingDelete(true)}>
             Delete
           </Item>
-          <PluginItems entries={pluginGroups.get(GROUPS.lifecycle)} />
+          <PluginItems entries={pluginGroups.get(GROUPS.lifecycle)?.trailing} />
           <PluginGroups groups={pluginGroups} after={GROUPS.lifecycle} />
         </ContextMenu.Content>
       </ContextMenu.Portal>
@@ -228,18 +241,30 @@ function RowMenuContents({
 /** bb's groups that this menu's own sections stand for, in menu order. */
 const SECTION_GROUPS: readonly string[] = [GROUPS.open, GROUPS.state, GROUPS.organize, GROUPS.lifecycle];
 
-/**
- * bb's own actions are this menu's items. bb's native thread list moves
- * threads between its sections, which this sidebar does not draw.
- */
-const SKIPPED_PLUGIN_IDS = new Set(["bb--core", "thread-list"]);
+/** bb's native thread list moves threads between its sections, which this sidebar does not draw. */
+const MOVE_TO_SECTION = "thread-list/move";
 
-/** Other plugins' thread actions by group, in bb's menu order. */
+/**
+ * Other plugins' thread actions in one group, in bb's menu order: those bb
+ * sorts before the group's first own action, and those after it.
+ */
+interface PluginSection {
+  leading: PluginThreadActionEntry[];
+  trailing: PluginThreadActionEntry[];
+}
+
+/** bb's own actions are this menu's items; the rest go to the section of their group. */
 function groupPluginActions(actions: readonly PluginThreadActionEntry[]) {
-  const groups = new Map<string, PluginThreadActionEntry[]>();
+  const groups = new Map<string, PluginSection>();
+  const groupsWithCore = new Set<string>();
   for (const entry of actions) {
-    if (SKIPPED_PLUGIN_IDS.has(entry.pluginId)) continue;
-    groups.set(entry.group, [...(groups.get(entry.group) ?? []), entry]);
+    if (entry.key === MOVE_TO_SECTION) continue;
+    const section = groups.get(entry.group);
+    if (entry.pluginId === "bb--core") {
+      if (section && !groupsWithCore.has(entry.group)) section.leading = section.trailing.splice(0);
+      groupsWithCore.add(entry.group);
+    } else if (section) section.trailing.push(entry);
+    else groups.set(entry.group, { leading: [], trailing: [entry] });
   }
   return groups;
 }
@@ -253,7 +278,7 @@ function PluginGroups({
   after,
   before,
 }: {
-  groups: ReadonlyMap<string, readonly PluginThreadActionEntry[]>;
+  groups: ReadonlyMap<string, PluginSection>;
   after?: string;
   before?: string;
 }) {
@@ -264,10 +289,10 @@ function PluginGroups({
         (after === undefined || group > after) &&
         (before === undefined || group < before),
     )
-    .map(([group, entries]) => (
+    .map(([group, { leading, trailing }]) => (
       <Fragment key={group}>
         {after === undefined ? null : <Separator />}
-        <PluginItems entries={entries} />
+        <PluginItems entries={[...leading, ...trailing]} />
         {after === undefined ? <Separator /> : null}
       </Fragment>
     ));
@@ -276,7 +301,7 @@ function PluginGroups({
 function PluginItems({ entries = [] }: { entries?: readonly PluginThreadActionEntry[] }) {
   return entries.map(({ key, action }) =>
     action.choices ? (
-      <ChoicesSubmenu key={key} action={action} />
+      <ThreadActionChoices key={key} action={action} />
     ) : (
       <Item
         key={key}
@@ -291,60 +316,6 @@ function PluginItems({ entries = [] }: { entries?: readonly PluginThreadActionEn
         </span>
       </Item>
     ),
-  );
-}
-
-function ChoicesSubmenu({ action }: { action: PluginBoundThreadAction }) {
-  const portalScope = usePortalScopeProps();
-  return (
-    <ContextMenu.Sub>
-      <ContextMenu.SubTrigger
-        disabled={action.disabled}
-        title={action.detail}
-        className={cn(
-          "flex cursor-pointer items-center gap-2 rounded-md px-2 py-[0.3125rem] text-xs outline-none",
-          "data-[state=open]:bg-accent data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground",
-          "data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50",
-        )}
-      >
-        <BbIcon name={action.icon} className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-        {action.label}
-        <Icon name="ChevronRight" className="ml-auto size-4 opacity-60" />
-      </ContextMenu.SubTrigger>
-      <ContextMenu.Portal>
-        <ContextMenu.SubContent
-          {...portalScope}
-          aria-label={action.label}
-          sideOffset={4}
-          className="z-50 min-w-40 max-w-64 rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-md"
-        >
-          {action.choices?.items.map((choice) => (
-            <ContextMenu.CheckboxItem
-              key={choice.id}
-              checked={choice.selected ?? false}
-              disabled={choice.disabled}
-              onSelect={() => void action.run(choice.id)}
-              className={cn(
-                "flex cursor-pointer items-center gap-2 rounded-md px-2 py-[0.3125rem] text-xs outline-none",
-                "data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground",
-                "data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50",
-              )}
-            >
-              {choice.icon ? (
-                <BbIcon name={choice.icon} className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-              ) : null}
-              {choice.label}
-              <ContextMenu.ItemIndicator className="ml-auto">
-                <Icon name="Check" className="size-3.5" aria-hidden="true" />
-              </ContextMenu.ItemIndicator>
-            </ContextMenu.CheckboxItem>
-          ))}
-          {action.choices?.hint ? (
-            <p className="px-2 py-1 text-xs text-muted-foreground">{action.choices.hint}</p>
-          ) : null}
-        </ContextMenu.SubContent>
-      </ContextMenu.Portal>
-    </ContextMenu.Sub>
   );
 }
 
