@@ -1,7 +1,13 @@
-import { useThreadActions, useSidebarThreads } from "./bb-sdk";
-import { useRef, useState, type ReactNode } from "react";
+import { BbIcon, THREAD_ACTION_GROUPS as GROUPS, useThreadActions, useSidebarThreads } from "./bb-sdk";
+import { Fragment, useRef, useState, type ReactNode } from "react";
 import * as ContextMenu from "@radix-ui/react-context-menu";
-import { useBbNavigate, useRpc, type PluginSidebarThread } from "@get-bb/plugin-sdk/app";
+import {
+  useBbNavigate,
+  useRpc,
+  type PluginBoundThreadAction,
+  type PluginSidebarThread,
+  type PluginThreadActionEntry,
+} from "@get-bb/plugin-sdk/app";
 import { errorDetail, toast } from "./lib/toast";
 import type { threadInboxRpcContract } from "./contract";
 import { ParentThreadMenu } from "./ParentThreadMenu";
@@ -54,17 +60,8 @@ function RowMenuContents({
   onWake,
   onRename,
 }: Omit<RowContextMenuProps, "children">) {
-  const actions = useThreadActions(thread, {
-    keys: [
-      "bb--core/split",
-      "bb--core/copyLink",
-      "bb--core/pin",
-      "bb--core/read",
-      "bb--core/rename",
-      "bb--core/archive",
-    ],
-    requestRename: () => onRename?.(),
-  });
+  const actions = useThreadActions(thread, { requestRename: () => onRename?.() });
+  const pluginGroups = groupPluginActions(actions);
   const navigate = useBbNavigate();
   // bb 0.46 always supplies pin/read/rename/archive for sidebar rows, and bb
   // 0.49 copyLink. Split is omitted in compact mode and for the focused pane;
@@ -91,7 +88,8 @@ function RowMenuContents({
     onSettle ||
     onUnsettle ||
     onWake ||
-    (canSnooze && onSnooze && snoozePresets.length > 0)
+    (canSnooze && onSnooze && snoozePresets.length > 0) ||
+    pluginGroups.has(GROUPS.state)
   );
   const togglePin = async () => {
     if (thread.isPinned) {
@@ -125,6 +123,7 @@ function RowMenuContents({
           }}
           className="z-50 min-w-44 rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-md"
         >
+          <PluginGroups groups={pluginGroups} before={GROUPS.open} />
           <Item onSelect={() => void run("split")}>Open in split</Item>
           <ParentThreadMenu thread={thread} />
           {notifiesParent(thread) ? (
@@ -159,6 +158,8 @@ function RowMenuContents({
               </ContextMenu.Portal>
             </ContextMenu.Sub>
           ) : null}
+          <PluginItems entries={pluginGroups.get(GROUPS.open)} />
+          <PluginGroups groups={pluginGroups} after={GROUPS.open} before={GROUPS.state} />
           {hasPinLifecycleItems ? <Separator /> : null}
           {thread.isPinned || thread.parentThreadId == null ? (
             <Item icon={thread.isPinned ? "PinOff" : "Pin"} onSelect={() => void togglePin()}>
@@ -188,6 +189,8 @@ function RowMenuContents({
               Un-settle
             </Item>
           ) : null}
+          <PluginItems entries={pluginGroups.get(GROUPS.state)} />
+          <PluginGroups groups={pluginGroups} after={GROUPS.state} before={GROUPS.organize} />
           <Separator />
           {onRename ? (
             <Item
@@ -199,8 +202,10 @@ function RowMenuContents({
             </Item>
           ) : null}
           <Item onSelect={() => void run("read")}>{thread.isUnread ? "Mark read" : "Mark unread"}</Item>
+          <PluginItems entries={pluginGroups.get(GROUPS.organize)} />
           <Separator />
           <CopySubmenu thread={thread} onCopyLink={() => void run("copyLink")} />
+          <PluginGroups groups={pluginGroups} after={GROUPS.organize} before={GROUPS.lifecycle} />
           <Separator />
           <Item disabled={!canArchive} onSelect={() => void run("archive")}>
             Archive
@@ -208,6 +213,8 @@ function RowMenuContents({
           <Item destructive onSelect={() => setConfirmingDelete(true)}>
             Delete
           </Item>
+          <PluginItems entries={pluginGroups.get(GROUPS.lifecycle)} />
+          <PluginGroups groups={pluginGroups} after={GROUPS.lifecycle} />
         </ContextMenu.Content>
       </ContextMenu.Portal>
       <DeleteThreadDialog thread={thread} open={confirmingDelete} onOpenChange={setConfirmingDelete} />
@@ -215,6 +222,129 @@ function RowMenuContents({
         <SnoozePickerDialog open={pickingSnooze} onOpenChange={setPickingSnooze} onSnooze={onSnooze} />
       ) : null}
     </>
+  );
+}
+
+/** bb's groups that this menu's own sections stand for, in menu order. */
+const SECTION_GROUPS: readonly string[] = [GROUPS.open, GROUPS.state, GROUPS.organize, GROUPS.lifecycle];
+
+/**
+ * bb's own actions are this menu's items. bb's native thread list moves
+ * threads between its sections, which this sidebar does not draw.
+ */
+const SKIPPED_PLUGIN_IDS = new Set(["bb--core", "thread-list"]);
+
+/** Other plugins' thread actions by group, in bb's menu order. */
+function groupPluginActions(actions: readonly PluginThreadActionEntry[]) {
+  const groups = new Map<string, PluginThreadActionEntry[]>();
+  for (const entry of actions) {
+    if (SKIPPED_PLUGIN_IDS.has(entry.pluginId)) continue;
+    groups.set(entry.group, [...(groups.get(entry.group) ?? []), entry]);
+  }
+  return groups;
+}
+
+/**
+ * Groups that are not one of this menu's sections, each a section of its own
+ * between `after` and `before`, as bb places a group where it sorts.
+ */
+function PluginGroups({
+  groups,
+  after,
+  before,
+}: {
+  groups: ReadonlyMap<string, readonly PluginThreadActionEntry[]>;
+  after?: string;
+  before?: string;
+}) {
+  return [...groups]
+    .filter(
+      ([group]) =>
+        !SECTION_GROUPS.includes(group) &&
+        (after === undefined || group > after) &&
+        (before === undefined || group < before),
+    )
+    .map(([group, entries]) => (
+      <Fragment key={group}>
+        {after === undefined ? null : <Separator />}
+        <PluginItems entries={entries} />
+        {after === undefined ? <Separator /> : null}
+      </Fragment>
+    ));
+}
+
+function PluginItems({ entries = [] }: { entries?: readonly PluginThreadActionEntry[] }) {
+  return entries.map(({ key, action }) =>
+    action.choices ? (
+      <ChoicesSubmenu key={key} action={action} />
+    ) : (
+      <Item
+        key={key}
+        bbIcon={action.icon}
+        destructive={action.variant === "destructive"}
+        disabled={action.disabled}
+        onSelect={() => void action.run()}
+      >
+        <span className="flex min-w-0 flex-col">
+          <span>{action.label}</span>
+          {action.detail ? <span className="text-muted-foreground">{action.detail}</span> : null}
+        </span>
+      </Item>
+    ),
+  );
+}
+
+function ChoicesSubmenu({ action }: { action: PluginBoundThreadAction }) {
+  const portalScope = usePortalScopeProps();
+  return (
+    <ContextMenu.Sub>
+      <ContextMenu.SubTrigger
+        disabled={action.disabled}
+        title={action.detail}
+        className={cn(
+          "flex cursor-pointer items-center gap-2 rounded-md px-2 py-[0.3125rem] text-xs outline-none",
+          "data-[state=open]:bg-accent data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground",
+          "data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50",
+        )}
+      >
+        <BbIcon name={action.icon} className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+        {action.label}
+        <Icon name="ChevronRight" className="ml-auto size-4 opacity-60" />
+      </ContextMenu.SubTrigger>
+      <ContextMenu.Portal>
+        <ContextMenu.SubContent
+          {...portalScope}
+          aria-label={action.label}
+          sideOffset={4}
+          className="z-50 min-w-40 max-w-64 rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-md"
+        >
+          {action.choices?.items.map((choice) => (
+            <ContextMenu.CheckboxItem
+              key={choice.id}
+              checked={choice.selected ?? false}
+              disabled={choice.disabled}
+              onSelect={() => void action.run(choice.id)}
+              className={cn(
+                "flex cursor-pointer items-center gap-2 rounded-md px-2 py-[0.3125rem] text-xs outline-none",
+                "data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground",
+                "data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50",
+              )}
+            >
+              {choice.icon ? (
+                <BbIcon name={choice.icon} className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+              ) : null}
+              {choice.label}
+              <ContextMenu.ItemIndicator className="ml-auto">
+                <Icon name="Check" className="size-3.5" aria-hidden="true" />
+              </ContextMenu.ItemIndicator>
+            </ContextMenu.CheckboxItem>
+          ))}
+          {action.choices?.hint ? (
+            <p className="px-2 py-1 text-xs text-muted-foreground">{action.choices.hint}</p>
+          ) : null}
+        </ContextMenu.SubContent>
+      </ContextMenu.Portal>
+    </ContextMenu.Sub>
   );
 }
 
@@ -312,6 +442,7 @@ function SnoozeSubmenu({
 function Item({
   children,
   icon,
+  bbIcon,
   destructive = false,
   disabled = false,
   title,
@@ -319,6 +450,8 @@ function Item({
 }: {
   children: ReactNode;
   icon?: IconName;
+  /** A bb icon name, for another plugin's action. */
+  bbIcon?: string;
   destructive?: boolean;
   disabled?: boolean;
   title?: string;
@@ -337,6 +470,7 @@ function Item({
       )}
     >
       {icon ? <Icon name={icon} className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" /> : null}
+      {bbIcon ? <BbIcon name={bbIcon} className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" /> : null}
       {children}
     </ContextMenu.Item>
   );
