@@ -89,8 +89,8 @@ async function settleSetup(lastReadAt: number | null) {
       threads: {
         list: async () => [thread],
         get: async () => makeThreadResponse(thread),
-        markRead: async () => makeThreadResponse({ ...thread, lastReadAt: 60 }),
-        markUnread: async () => makeThreadResponse({ ...thread, lastReadAt: null }),
+        markRead: async () => makeThreadResponse(Object.assign(thread, { lastReadAt: 60 })),
+        markUnread: async () => makeThreadResponse(Object.assign(thread, { lastReadAt: null })),
       },
     },
   });
