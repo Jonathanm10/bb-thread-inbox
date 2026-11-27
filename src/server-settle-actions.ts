@@ -183,9 +183,13 @@ export function createServerSettleActions(ctx: ServerContext, lifecycle: ReturnT
         settleUndos.delete(undoToken);
         publishLifecycleChanges(restored);
         for (const id of restored) {
-          // Someone who opened the thread since Settle has read it; keep that.
+          // A thread read again since Settle keeps that read.
           if (!undo.markedRead.has(id) || tree.get(id)?.lastReadAt !== undo.markedRead.get(id)) continue;
-          await ctx.bb.sdk.threads.markUnread({ threadId: id });
+          try {
+            await ctx.bb.sdk.threads.markUnread({ threadId: id });
+          } catch (error) {
+            ctx.bb.log.warn(`Undid Settle of ${id} but could not mark it unread: ${errorMessage(error)}`);
+          }
         }
         return { ok: true };
       }

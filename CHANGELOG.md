@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Settle marks the settled thread and its settled children read, so a finished thread you never opened stops showing as unread. Undo makes them unread again unless you opened them in the meantime.
+- Settle marks the settled thread and its settled children read, so a finished thread you never opened stops showing as unread. Undo makes them unread again unless bb recorded a new read since.
 
 ### Added
 

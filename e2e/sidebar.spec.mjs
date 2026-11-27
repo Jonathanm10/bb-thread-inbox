@@ -128,11 +128,11 @@ test("settle moves to Settled and Undo restores Active", async ({ page, request 
   await expect(link(page, cedar.title, "Settled")).toBeVisible();
   await expect(link(page, cedar.title)).toHaveCount(0);
   expect((await rpc(request, "listLifecycle")).rows.find((row) => row.threadId === cedar.id).settledAt).not.toBeNull();
-  expect(await unread()).toBe(false);
+  await expect.poll(unread).toBe(false);
   await page.getByRole("button", { name: "Undo", exact: true }).click();
   await expect(link(page, cedar.title)).toBeVisible();
   expect((await rpc(request, "listLifecycle")).rows.find((row) => row.threadId === cedar.id).settledAt).toBeNull();
-  expect(await unread()).toBe(true);
+  await expect.poll(unread).toBe(true);
 });
 
 test("right-click menu matches the sidebar action list", async ({ page, context }) => {
